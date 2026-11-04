@@ -1,0 +1,67 @@
+
+# ==========================================
+# VARIABLES DE ENTORNO Y CREDENCIALES
+# ==========================================
+
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+
+# ==========================================
+# DATOS DESCARGADOS
+# ==========================================
+
+datos/
+
+# ==========================================
+# APACHE AIRFLOW
+# ==========================================
+
+airflow/logs/
+airflow/config/
+airflow/airflow.db/
+airflow/standalone_admin_password.txt
+
+# ==========================================
+# PYTHON
+# ==========================================
+
+__pycache__/
+*.pyc
+*.pyo
+
+.venv/
+venv/
+
+.pytest_cache/
+
+# ==========================================
+# LOGS Y ARCHIVOS TEMPORALES
+# ==========================================
+
+*.log
+*.tmp
+*.bak
+
+# ==========================================
+# EDITORES
+# ==========================================
+
+.vscode/
+.idea/
+
+# ==========================================
+# SISTEMA OPERATIVO
+# ==========================================
+
+.DS_Store
+Thumbs.db
+
+# Script temporal de Telegram
+obtener_chat_id.py
+
+# Script legado de carga RAW
+cargar_raw.py

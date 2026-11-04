@@ -1,0 +1,18 @@
+
+services:
+
+  airflow-worker:
+    env_file:
+      - .env
+
+    volumes:
+      - ../datos:/opt/airflow/data
+      - ../sql:/opt/airflow/sql:ro
+
+  airflow-dag-processor:
+    env_file:
+      - .env
+
+    volumes:
+      - ../datos:/opt/airflow/data
+      - ../sql:/opt/airflow/sql:ro
