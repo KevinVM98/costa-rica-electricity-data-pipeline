@@ -1,0 +1,17 @@
+
+# ==========================================
+# ARESEP DATA ENGINEERING PIPELINE
+# Dependencias Python
+# ==========================================
+
+# Extraccion desde la API REST
+requests==2.34.2
+
+# Procesamiento de datos
+pandas==3.1.0
+
+# Conexion con PostgreSQL
+psycopg[binary]==3.3.5
+
+# Manejo de fechas y zonas horarias
+pendulum==3.2.0
