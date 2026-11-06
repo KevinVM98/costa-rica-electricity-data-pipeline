@@ -65,3 +65,7 @@ obtener_chat_id.py
 
 # Script legado de carga RAW
 cargar_raw.py
+
+# Ejecutores antiguos reemplazados por Airflow
+ejecutar_pipeline.py
+ejecutar_pipeline.bat
