@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 import pendulum
 
 from airflow.sdk import dag, task, get_current_context, Param
-
+from periodos import seleccionar_anhos
 
 # ==========================================
 # CONFIGURACION GENERAL
@@ -29,24 +29,16 @@ SQL = Path("/opt/airflow/sql/transformaciones.sql")
 
 ANHO_INICIO_HISTORICO = 2018
 
-
 def obtener_anhos_a_procesar():
-    """Seleccionar periodos segun el modo indicado al ejecutar el DAG.
+    """Selecciona los años según el modo de ejecución del DAG."""
 
-    - mensual: ano actual y anterior (valor por defecto)
-    - historico: desde 2018 hasta el ano actual
-    """
     contexto = get_current_context()
     modo = contexto["params"]["modo"]
+
     anho_actual = pendulum.now("America/Costa_Rica").year
 
-    if modo == "mensual":
-        return [anho_actual - 1, anho_actual]
+    return seleccionar_anhos(modo, anho_actual)
 
-    if modo == "historico":
-        return list(range(ANHO_INICIO_HISTORICO, anho_actual + 1))
-
-    raise ValueError(f"Modo de carga no reconocido: {modo}")
 
 
 def configurar_postgres():

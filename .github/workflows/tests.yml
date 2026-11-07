@@ -1,0 +1,35 @@
+
+name: Python Tests
+
+on:
+  push:
+    branches:
+      - main
+      - feature/tests-ci
+
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: Run pytest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar pytest
+        run: python -m pip install pytest
+
+      - name: Ejecutar pruebas
+        run: python -m pytest tests/ -v
