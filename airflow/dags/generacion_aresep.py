@@ -6,12 +6,13 @@ import time
 from pathlib import Path
 from datetime import timedelta
 from tempfile import TemporaryDirectory
-from decimal import Decimal, InvalidOperation
 
 import pendulum
 
 from airflow.sdk import dag, task, get_current_context, Param
 from periodos import seleccionar_anhos
+from calidad import validar_registro
+
 
 # ==========================================
 # CONFIGURACION GENERAL
@@ -27,18 +28,13 @@ DATOS = Path("/opt/airflow/data")
 SQL = Path("/opt/airflow/sql/transformaciones.sql")
 
 
-ANHO_INICIO_HISTORICO = 2018
-
 def obtener_anhos_a_procesar():
-    """Selecciona los años según el modo de ejecución del DAG."""
-
+    """Selecciona los anos segun el modo de ejecucion del DAG."""
     contexto = get_current_context()
     modo = contexto["params"]["modo"]
-
     anho_actual = pendulum.now("America/Costa_Rica").year
 
     return seleccionar_anhos(modo, anho_actual)
-
 
 
 def configurar_postgres():
@@ -321,19 +317,6 @@ def pipeline_generacion():
         contexto = get_current_context()
         dag_run_id = contexto["ti"].run_id
 
-        campos_obligatorios = [
-            "anho",
-            "id_Mes",
-            "empresaGenera",
-            "planta"
-        ]
-
-        campos_energia = [
-            "energiaPunta",
-            "energiaValle",
-            "energiaNoche"
-        ]
-
         errores = []
         resumen = []
         total_revisados = 0
@@ -357,66 +340,14 @@ def pipeline_generacion():
 
             errores_anho = 0
 
-            for numero, registro in enumerate(
-                registros,
-                start=1
-            ):
-
-                if not isinstance(registro, dict):
-                    errores.append(
-                        f"{anho}, fila {numero}: estructura invalida"
-                    )
-                    errores_anho += 1
-                    continue
-
-                for campo in campos_obligatorios:
-
-                    valor = registro.get(campo)
-
-                    if valor is None or str(valor).strip() == "":
-                        errores.append(
-                            f"{anho}, fila {numero}: falta {campo}"
-                        )
-                        errores_anho += 1
-
-                try:
-                    mes = int(registro["id_Mes"])
-                    anho_registro = int(registro["anho"])
-
-                    if not 1 <= mes <= 12:
-                        raise ValueError()
-
-                    if anho_registro != anho:
-                        raise ValueError()
-
-                except (ValueError, TypeError, KeyError):
-                    errores.append(
-                        f"{anho}, fila {numero}: fecha invalida"
-                    )
-                    errores_anho += 1
-
-                for campo in campos_energia:
-
-                    valor = registro.get(campo)
-
-                    if valor is None or valor == "":
-                        continue
-
-                    try:
-                        numero = Decimal(str(valor))
-
-                        if not numero.is_finite():
-                            raise InvalidOperation()
-
-                    except (
-                        InvalidOperation,
-                        ValueError,
-                        TypeError
-                    ):
-                        errores.append(
-                            f"{anho}: {campo} no es numerico"
-                        )
-                        errores_anho += 1
+            for numero, registro in enumerate(registros, start=1):
+                errores_registro = validar_registro(
+                    registro,
+                    anho,
+                    numero
+                )
+                errores.extend(errores_registro)
+                errores_anho += len(errores_registro)
 
             total_revisados += len(registros)
 
