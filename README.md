@@ -1,218 +1,486 @@
-
 # Costa Rica Electricity Generation Data Pipeline
 
-Pipeline de ingeniería de datos para la extracción,
-almacenamiento, transformación y monitoreo de datos
-de generación eléctrica por planta en Costa Rica.
+Pipeline **ELT de ingeniería de datos** para recopilar, validar, almacenar y preparar para análisis información pública de generación eléctrica por planta en Costa Rica, utilizando la API de datos abiertos de la **Autoridad Reguladora de los Servicios Públicos (ARESEP)**.
 
-## Descripción
+El proyecto combina **Python, PostgreSQL, Apache Airflow, SQL y Docker Compose** en una plataforma local que admite cargas históricas e incrementales, controles de calidad y monitoreo operativo.
 
-Este proyecto implementa una plataforma de datos
-local utilizando información pública de la
-Autoridad Reguladora de los Servicios Públicos
-(ARESEP).
+> **Alcance:** proyecto personal y educativo de ingeniería de datos. No es una plataforma oficial de ARESEP ni del Instituto Costarricense de Electricidad (ICE). La infraestructura Docker incluida está orientada a desarrollo y demostraciones locales, no a producción.
 
-El objetivo es construir un pipeline ELT que permita
-procesar información histórica de generación
-eléctrica, mantener registros incrementales y
-preparar datos para su análisis.
+## 1. Objetivos
 
-El conjunto de datos utilizado comprende registros
-disponibles entre 2018 y 2026.
+- Extraer datos públicos de generación eléctrica por planta desde una API REST.
+- Mantener un histórico de registros sin volver a insertar contenidos idénticos.
+- Separar el almacenamiento en capas **RAW**, **STAGING** y **MART**.
+- Orquestar el proceso con tareas, reintentos y ejecuciones programadas en Airflow.
+- Validar los datos antes de cargarlos y conservar métricas de cada ejecución.
+- Permitir que el entorno pueda reconstruirse desde una clonación limpia del repositorio.
 
-## Tecnologías utilizadas
+## 2. Stack tecnológico
 
-- Python: extracción, validación y carga de datos.
-- PostgreSQL 17: almacenamiento y consultas SQL.
-- Apache Airflow 3: orquestación de pipelines.
-- Docker y Docker Compose: infraestructura local.
-- SQL: transformaciones y modelado analítico.
-- Git y GitHub: control de versiones.
+| Tecnología | Función |
+| --- | --- |
+| Python | Consumo de la API, validaciones y carga |
+| Apache Airflow 3.3.2 | Orquestación del pipeline |
+| PostgreSQL 17 | Almacenamiento del conjunto de datos ARESEP |
+| PostgreSQL 16 | Base interna de metadatos de Airflow |
+| SQL | Limpieza, transformación y consultas |
+| Docker y Docker Compose | Contenedores, redes y volúmenes |
+| Redis | Broker de tareas del CeleryExecutor de Airflow |
+| Git y GitHub | Control de versiones y publicación |
 
-## Arquitectura
+La imagen de Airflow se construye a partir de `airflow/Dockerfile`, con las dependencias necesarias para ejecutar el DAG.
+
+## 3. Arquitectura
 
 ```text
-              API REST ARESEP
-                     |
-                     v
-              Apache Airflow
-                     |
-                     v
-             Extraer generación
-                     |
-                     v
-              Validar datos
-                     |
-                     v
-              PostgreSQL RAW
-             (UPSERT / SHA-256)
-                     |
-                     v
-               STAGING
-                     |
-                     v
-                 MART
-                     |
-                     v
-             Consumo analítico
-                (Previsto)
+                         API REST de ARESEP
+                                 |
+                                 v
+                         Apache Airflow
+                                 |
+             +-------------------+------------------+
+             | 1. registrar_inicio                  |
+             | 2. extraer_generacion                |
+             | 3. validar_datos                     |
+             | 4. cargar_raw                        |
+             | 5. transformar_datos                 |
+             +-------------------+------------------+
+                                 |
+                                 v
+                       PostgreSQL (ARESEP)
+                                 |
+                    +------------+------------+
+                    |            |            |
+                   RAW        STAGING        MART
+                  JSONB      SQL tipado    Vista SQL
+                    |            |            |
+                    +------------+------------+
+                                 |
+                       Consumo analítico
+                        (fase posterior)
 
-Monitoreo en PostgreSQL:
-- Calidad de datos
-- Métricas de carga
-- Historial de ejecuciones
+              Monitoreo operativo en PostgreSQL
+              - monitoring.ejecuciones_pipeline
+              - monitoring.calidad_datos
+              - monitoring.carga_datos
+
+       Infraestructura interna de Airflow (separada)
+             PostgreSQL 16 + Redis + servicios Airflow
 ```
 
-## Orquestación con Apache Airflow
+**Importante:** la base de datos interna de Airflow almacena metadatos del orquestador; no debe confundirse con el PostgreSQL 17 que conserva los registros de ARESEP.
 
-El pipeline se organiza en cinco tareas:
+## 4. Estructura del repositorio
 
-1. registrar_inicio
-2. extraer_generacion
-3. validar_datos
-4. cargar_raw
-5. transformar_datos
+```text
+costa-rica-electricity-data-pipeline/
+├── airflow/
+│   ├── dags/
+│   │   └── generacion_aresep.py
+│   ├── Dockerfile
+│   ├── docker-compose.yaml
+│   ├── compose.override.yaml
+│   └── .env.example
+├── sql/
+│   ├── init.sql
+│   └── transformaciones.sql
+├── compose.yaml
+├── descargar_generacion.py
+├── requirements.txt
+├── .env.example
+├── .gitignore
+└── README.md
+```
 
-Las tareas se ejecutan de manera secuencial.
+Los archivos `.env`, las credenciales, los registros descargados y los volúmenes de bases de datos **no se publican** en el repositorio.
 
-El DAG está configurado para ejecutarse el día
-10 de cada mes a las 6:00 a. m., hora de Costa Rica.
+## 5. Origen y cobertura de los datos
 
-La ejecución programada requiere que Docker
-y los servicios de Airflow estén disponibles.
+- **Proveedor:** ARESEP, portal de datos abiertos de Costa Rica.
+- **Recurso:** `ObtenerGeneracionFuentePlantaYCapacidadInstalada`.
+- **Formato consumido:** JSON.
+- **Cobertura comprobada:** registros correspondientes a 2018–2026.
+- **Disponibilidad parcial observada:** 2018 comienza en agosto y los registros consultados de 2026 llegan hasta septiembre. La cobertura puede cambiar con futuras actualizaciones de la API.
 
-## Almacenamiento
+La consulta se realiza por año mediante el endpoint:
 
-PostgreSQL organiza los datos mediante esquemas.
+```text
+https://datos.aresep.go.cr/ws.datosabiertos/Services/IE/Electricidad.svc/ObtenerGeneracionFuentePlantaYCapacidadInstalada/{anio}
+```
 
-### RAW
+La fuente es externa: la disponibilidad, estructura y cantidad de registros pueden cambiar con el tiempo.
 
-Conserva los registros obtenidos de ARESEP
-utilizando JSONB.
+## 6. Instalación local desde cero (Windows y PowerShell)
 
-La tabla raw.generacion_planta_v2 utiliza hashes
-SHA-256 para identificar contenidos repetidos.
+### 6.1. Requisitos
 
-### STAGING
+- **Git** instalado.
+- **Docker Desktop** iniciado, con Docker Compose V2 disponible.
+- **PowerShell** (los ejemplos siguientes usan su sintaxis).
+- Conexión a Internet para descargar imágenes Docker y consultar la API de ARESEP.
+- Recursos suficientes para ejecutar múltiples contenedores de Airflow. Se recomienda disponer de al menos 4 GB de memoria para Docker, además de los recursos que necesita el sistema operativo.
 
-Organiza las columnas y convierte mediciones
-a tipos numéricos mediante SQL.
+No es necesario instalar PostgreSQL ni Airflow directamente en Windows.
 
-### MART
+### 6.2. Clonar el repositorio
 
-Contiene vistas preparadas para consultas analíticas,
-incluyendo generación por planta y período.
+```powershell
+git clone https://github.com/KevinVM98/costa-rica-electricity-data-pipeline.git
+cd costa-rica-electricity-data-pipeline
+```
 
-Los períodos con múltiples registros diferentes
-se identifican para evitar agregaciones ambiguas.
+### 6.3. Configurar PostgreSQL de ARESEP
 
-## Carga incremental
+Crear el archivo local de variables de entorno:
 
-La ingesta consulta el año actual y el anterior.
+```powershell
+Copy-Item .env.example .env
+```
 
-Los registros se comparan mediante una huella
-SHA-256 calculada sobre su contenido JSON.
+Editar `.env` y **reemplazar la contraseña de ejemplo**:
 
-- Los contenidos nuevos se insertan.
-- Los contenidos existentes no se duplican.
-- Se conserva el histórico almacenado.
+```dotenv
+POSTGRES_USER=ice_user
+POSTGRES_PASSWORD=ESTABLECER_UNA_CONTRASENA_PROPIA
+POSTGRES_DB=ice_data
+POSTGRES_PORT=5433
+```
 
-La transformación STAGING todavía utiliza
-una reconstrucción completa.
+El puerto `5433` es el valor predeterminado de esta instalación. Si está ocupado, utilizar otro puerto disponible y actualizar también `ICE_PG_PORT` en `airflow/.env`.
 
-## Calidad de datos
+Iniciar PostgreSQL desde la raíz del proyecto:
 
-El pipeline incorpora validaciones de:
+```powershell
+docker compose up -d db
+```
 
-- Estructura de los registros.
-- Campos obligatorios.
-- Año y mes.
-- Tipos numéricos de energía.
+En una base nueva, Docker crea un volumen persistente y PostgreSQL ejecuta automáticamente `sql/init.sql`, que prepara los esquemas y tablas del pipeline.
 
-Si las validaciones fallan, se bloquea
-la carga correspondiente.
+Comprobar el contenedor:
 
-## Monitoreo
+```powershell
+docker compose ps db
+```
 
-Se utilizan tres tablas:
+Verificar las tablas del proyecto:
 
-monitoring.calidad_datos
+```powershell
+docker compose exec db psql -U ice_user -d ice_data -c "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('raw', 'staging', 'monitoring') AND table_type = 'BASE TABLE' ORDER BY table_schema, table_name;"
+```
 
-Registra el número de registros revisados
-y los problemas detectados.
+Se esperan **seis tablas** entre los esquemas `raw`, `staging` y `monitoring`.
 
-monitoring.carga_datos
+Verificar que la tabla RAW está inicialmente vacía:
 
-Registra inserciones nuevas, contenidos existentes
-y tiempos de procesamiento.
+```powershell
+docker compose exec db psql -U ice_user -d ice_data -c "SELECT COUNT(*) FROM raw.generacion_planta_v2;"
+```
 
-monitoring.ejecuciones_pipeline
+**Nota:** `sql/init.sql` se ejecuta automáticamente al inicializar un **volumen de datos nuevo**. Reiniciar un contenedor con un volumen existente no vuelve a ejecutar ese script.
 
-Registra el inicio, finalización y estado
-de las ejecuciones del pipeline.
+### 6.4. Preparar Apache Airflow
 
-## Resultados del desarrollo
+Crear el archivo de configuración local de Airflow:
 
-En las pruebas realizadas:
+```powershell
+Copy-Item .\airflow\.env.example .\airflow\.env
+```
 
-- Se descargaron 5.829 registros históricos.
-- Se identificaron 5.819 contenidos únicos.
-- Se implementó una carga idempotente por hash.
-- Se ejecutó correctamente el DAG de Airflow.
-- Se registraron métricas de calidad y carga
-  en PostgreSQL.
+En `airflow/.env`, revisar especialmente:
 
-Los resultados corresponden a los datos
-disponibles durante las pruebas.
+```dotenv
+AIRFLOW_UID=50000
+FERNET_KEY=REEMPLAZAR_CON_CLAVE_FERNET_VALIDA
+ICE_PG_HOST=host.docker.internal
+ICE_PG_PORT=5433
+ICE_PG_DB=ice_data
+ICE_PG_USER=ice_user
+ICE_PG_PASSWORD=LA_MISMA_CONTRASENA_DE_POSTGRES_PASSWORD
+```
 
-## Configuración
+- `ICE_PG_PASSWORD` debe coincidir con `POSTGRES_PASSWORD` del `.env` de la raíz.
+- `ICE_PG_PORT` debe coincidir con el puerto publicado por PostgreSQL de ARESEP.
+- `ICE_PG_HOST=host.docker.internal` permite llegar desde los contenedores de Airflow al puerto publicado por Docker Desktop en Windows.
+- `FERNET_KEY` debe contener una clave válida generada localmente; nunca debe subirse a GitHub.
 
-El proyecto utiliza archivos .env para
-las variables de entorno.
+Desde la raíz del repositorio, construir primero la imagen personalizada:
 
-Los archivos .env.example contienen referencias
-para configurar PostgreSQL y Airflow.
+```powershell
+Push-Location .\airflow
+docker compose -f docker-compose.yaml -f compose.override.yaml build
+Pop-Location
+```
 
-Las credenciales reales y los datos descargados
-no se incluyen en el repositorio.
+Generar una clave Fernet válida usando esa imagen:
 
-La infraestructura se ejecuta localmente
-utilizando Docker Compose.
+```powershell
+docker run --rm aresep-airflow:3.3.2 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
-## Estado del proyecto
+Copiar el valor generado en `FERNET_KEY` dentro de `airflow/.env`, sin comillas ni espacios adicionales. **No publicar ni compartir la clave.**
 
-Implementado:
+La configuración Docker Compose de Airflow incluye una cuenta inicial para uso local. Antes de desplegar un entorno compartido, cambiar sus credenciales predeterminadas y revisar la configuración de seguridad.
 
-- Extracción desde la API de ARESEP.
-- PostgreSQL y almacenamiento por capas.
-- UPSERT por contenido.
-- Orquestación mediante Airflow.
-- Validación de calidad de datos.
-- Registro de métricas operativas.
+### 6.5. Inicializar y levantar Airflow
 
-Pendiente:
+Desde la raíz del repositorio, ingresar a su carpeta:
 
-- Automatizar la inicialización del esquema SQL
-  para instalaciones nuevas.
-- Completar las instrucciones de instalación
-  reproducible desde cero.
-- Construir dashboards en Power BI.
+```powershell
+Push-Location .\airflow
+```
 
-## Fuente de datos
+Inicializar la base de metadatos de Airflow:
 
-ARESEP - Datos Abiertos
+```powershell
+docker compose -f docker-compose.yaml -f compose.override.yaml up -d airflow-init
+```
 
-https://datos.aresep.go.cr/
+Verificar el resultado de la inicialización:
 
-Los datos pertenecen a sus respectivos
-proveedores y se utilizan con fines
-educativos y de desarrollo técnico.
+```powershell
+docker compose -f docker-compose.yaml -f compose.override.yaml ps -a
+```
 
-## Autoría
+El servicio `airflow-init` debe finalizar satisfactoriamente (código de salida `0`). Para revisar problemas, consultar:
 
-Proyecto personal de ingeniería de datos,
-desarrollado con fines de aprendizaje
-y demostración técnica.
+```powershell
+docker compose -f docker-compose.yaml -f compose.override.yaml logs airflow-init
+```
 
-No representa una plataforma oficial
-del ICE ni de ARESEP.
+Iniciar los servicios principales:
+
+```powershell
+docker compose -f docker-compose.yaml -f compose.override.yaml up -d airflow-apiserver airflow-scheduler airflow-dag-processor airflow-worker airflow-triggerer
+```
+
+Revisar su estado:
+
+```powershell
+docker compose -f docker-compose.yaml -f compose.override.yaml ps
+```
+
+Regresar a la raíz:
+
+```powershell
+Pop-Location
+```
+
+Abrir la interfaz de Airflow:
+
+**http://localhost:8080**
+
+El puerto web `8080` es el predeterminado en `airflow/docker-compose.yaml`. Si ya está ocupado, cambiar **solo el puerto publicado del API Server**, por ejemplo de `8080:8080` a `8081:8080`, y abrir `http://localhost:8081`.
+
+El primer arranque de Airflow puede requerir más tiempo que los siguientes. Comprobar los estados y logs si algún servicio no alcanza un estado saludable.
+
+## 7. Ejecutar el pipeline
+
+El DAG se llama:
+
+```text
+generacion_electrica_aresep
+```
+
+Se compone de cinco tareas secuenciales:
+
+1. `registrar_inicio`: crea el registro inicial de la ejecución.
+2. `extraer_generacion`: descarga los JSON por año desde ARESEP.
+3. `validar_datos`: revisa la estructura, los campos obligatorios, el año, el mes y los campos numéricos de energía.
+4. `cargar_raw`: incorpora contenidos nuevos a RAW y registra las métricas de carga.
+5. `transformar_datos`: ejecuta `sql/transformaciones.sql` para reconstruir STAGING y actualizar la vista MART.
+
+### 7.1. Modos de ejecución
+
+| Parámetro `modo` | Comportamiento |
+| --- | --- |
+| `mensual` (predeterminado) | Consulta el año actual y el anterior |
+| `historico` | Consulta desde 2018 hasta el año actual |
+
+Para ejecutar el histórico desde la interfaz de Airflow:
+
+1. Abrir **Dags** y seleccionar `generacion_electrica_aresep`.
+2. Seleccionar **Trigger** y mantener **Single Run**.
+3. En **Tipo de carga**, elegir **Histórica (desde 2018)**.
+4. Confirmar la ejecución y revisar que las cinco tareas finalicen correctamente.
+
+**No utilizar la función de backfill de Airflow para esta operación:** el modo `historico` ya realiza la descarga de todos los años dentro de **una sola ejecución del DAG**.
+
+Para una ejecución manual de prueba se puede mantener el DAG pausado para evitar activar su programación periódica.
+
+### 7.2. Programación automática
+
+El DAG utiliza la expresión cron `0 6 10 * *`: **día 10 de cada mes a las 6:00 a. m.**, con zona horaria **America/Costa_Rica**. La programación solo opera mientras Airflow esté disponible y el DAG se encuentre habilitado.
+
+## 8. Modelo de datos
+
+### RAW — `raw.generacion_planta_v2`
+
+Conserva cada registro recibido en una columna `JSONB`, junto con atributos de identificación y un hash **SHA-256** calculado a partir de su contenido.
+
+La carga deduplica cada lote y utiliza `ON CONFLICT (contenido_hash) DO NOTHING` para no insertar nuevamente documentos idénticos. También actualiza la fecha de última observación de los contenidos ya conocidos.
+
+Esta estrategia evita duplicados **idénticos por contenido**; no implica que todos los registros de una misma planta y período sean equivalentes.
+
+### STAGING — `staging.generacion_planta`
+
+Extrae los atributos de interés, normaliza textos y convierte los valores de energía a tipos numéricos mediante SQL. En la implementación actual, STAGING se **reconstruye completamente** a partir de RAW al ejecutar las transformaciones.
+
+### MART — `mart.generacion_por_planta`
+
+Es una **vista SQL**, no una tabla de agregados ni una vista materializada. Expone los registros de STAGING, calcula `energia_total` cuando el período tiene un único registro y clasifica las combinaciones ambiguas mediante `estado_periodo`.
+
+Cuando se detectan varios registros para una misma combinación de empresa, planta, año y mes, la vista evita sumar automáticamente esos valores y marca el período como `MULTIPLES_REGISTROS`.
+
+## 9. Calidad y monitoreo
+
+Antes de cargar RAW, el DAG comprueba:
+
+- Que el conjunto de datos tenga una estructura válida.
+- Que existan los campos obligatorios (`anho`, `id_Mes`, `empresaGenera`, `planta`).
+- Que el mes esté entre 1 y 12 y que el año corresponda al período consultado.
+- Que los campos de energía informados sean numéricos finitos.
+
+Si se detectan errores, la tarea de validación falla y no continúa con la carga correspondiente.
+
+Las métricas se almacenan en:
+
+| Tabla | Contenido |
+| --- | --- |
+| `monitoring.ejecuciones_pipeline` | Inicio, fin, estado y detalle de fallos |
+| `monitoring.calidad_datos` | Registros revisados y errores por año |
+| `monitoring.carga_datos` | Registros recibidos, únicos, nuevos, existentes y duración |
+
+## 10. Consultas de verificación
+
+Ejecutar estas consultas desde la **raíz** del proyecto, con el contenedor PostgreSQL iniciado.
+
+**Cobertura histórica y total en RAW:**
+
+```powershell
+docker compose exec db psql -U ice_user -d ice_data -c "SELECT COUNT(*) AS total_registros, MIN(anho) AS primer_anho, MAX(anho) AS ultimo_anho, COUNT(DISTINCT anho) AS anhos_procesados FROM raw.generacion_planta_v2;"
+```
+
+**Registros por año:**
+
+```powershell
+docker compose exec db psql -U ice_user -d ice_data -c "SELECT anho, COUNT(*) AS registros FROM raw.generacion_planta_v2 GROUP BY anho ORDER BY anho;"
+```
+
+**Capas de transformación:**
+
+```powershell
+docker compose exec db psql -U ice_user -d ice_data -c "SELECT 'staging' AS capa, COUNT(*) AS filas FROM staging.generacion_planta UNION ALL SELECT 'mart' AS capa, COUNT(*) AS filas FROM mart.generacion_por_planta;"
+```
+
+**Validaciones de calidad:**
+
+```powershell
+docker compose exec db psql -U ice_user -d ice_data -c "SELECT anho, registros_revisados, errores_detectados FROM monitoring.calidad_datos ORDER BY anho;"
+```
+
+**Resumen de calidad:**
+
+```powershell
+docker compose exec db psql -U ice_user -d ice_data -c "SELECT COUNT(DISTINCT anho) AS anhos_validados, SUM(registros_revisados) AS total_revisados, SUM(errores_detectados) AS total_errores FROM monitoring.calidad_datos;"
+```
+
+## 11. Prueba de reproducibilidad realizada
+
+Se creó un **clon limpio del repositorio publicado en GitHub**, con una instalación de PostgreSQL y Airflow independiente del entorno de desarrollo habitual.
+
+La prueba comprobó:
+
+- Clonación del código publicado.
+- Preparación de archivos de entorno a partir de `.env.example`.
+- Creación de la red, el volumen y el contenedor de PostgreSQL.
+- Inicialización automática de los esquemas y las tablas mediante `sql/init.sql`.
+- Construcción e inicio de Airflow con su imagen personalizada.
+- Reconocimiento del DAG sin errores de importación.
+- Conexión efectiva del worker de Airflow a la nueva base de datos.
+- Ejecución manual del pipeline en modo `historico`.
+- Disponibilidad de los registros en RAW, STAGING y MART.
+
+### Resultados observados
+
+| Métrica | Resultado |
+| --- | ---: |
+| Período de datos | 2018–2026 |
+| Años procesados | 9 |
+| Registros recibidos de la API durante las pruebas | 5.829 |
+| Contenidos únicos almacenados en RAW | 5.819 |
+| Registros en STAGING | 5.819 |
+| Filas consultables en MART | 5.819 |
+| Tareas exitosas de Airflow | 5 de 5 |
+
+En la revisión de calidad realizada, los años consultados aparecieron con **0 errores detectados**. Estos valores describen la ejecución de prueba y pueden cambiar si ARESEP actualiza su fuente.
+
+La reproducibilidad comprobada corresponde a un **entorno local con Docker Desktop**. No equivale todavía a una certificación de despliegue en producción o en múltiples sistemas operativos.
+
+### Ejecutar dos copias en una misma computadora
+
+Para una instalación de prueba **en paralelo** con otra ya levantada, se deben separar:
+
+- El `container_name` de PostgreSQL en el `compose.yaml` del clon.
+- El `POSTGRES_PORT` de la raíz y el `ICE_PG_PORT` de Airflow.
+- El puerto publicado del `airflow-apiserver` (por ejemplo, `8081:8080`).
+- Los nombres de proyecto de Docker Compose, mediante `-p`, para obtener redes y volúmenes independientes.
+
+Durante la prueba se utilizaron los proyectos Compose `aresep-prueba` y `aresep-airflow-prueba`, el contenedor `ice-postgres-prueba` y los puertos `5434` (PostgreSQL) y `8081` (Airflow). **Estos ajustes solo se necesitan cuando ambas instalaciones conviven**; la instalación predeterminada usa los puertos `5433` y `8080`.
+
+## 12. Operación y precauciones
+
+Para detener los servicios de Airflow conservando sus volúmenes:
+
+```powershell
+Push-Location .\airflow
+docker compose -f docker-compose.yaml -f compose.override.yaml down
+Pop-Location
+```
+
+Para detener PostgreSQL de ARESEP conservando su volumen:
+
+```powershell
+docker compose down
+```
+
+**No añadir `-v` a `docker compose down` si se desea conservar los datos.** La eliminación de volúmenes puede borrar las bases persistentes.
+
+Consideraciones de seguridad:
+
+- No publicar `.env`, contraseñas ni claves Fernet.
+- Sustituir las credenciales de ejemplo antes de usar el entorno.
+- La configuración de Airflow incluida utiliza valores adecuados para pruebas locales; requiere endurecimiento de seguridad antes de exponerse a redes públicas.
+- Verificar los datos y las métricas antes de utilizarlos para conclusiones analíticas.
+
+## 13. Estado del proyecto y próximos pasos
+
+### Implementado y comprobado
+
+- Extracción mediante la API REST de ARESEP.
+- Carga histórica y carga incremental por contenido.
+- Controles de calidad y monitoreo en PostgreSQL.
+- Organización de datos en RAW, STAGING y MART.
+- Orquestación con Airflow y ejecución del DAG de cinco tareas.
+- Inicialización automática de PostgreSQL.
+- Imagen de Airflow reproducible mediante Dockerfile.
+- Instalación y ejecución histórica desde una clonación limpia de GitHub.
+
+### Mejoras previstas
+
+- Pruebas automatizadas con **pytest**.
+- Integración continua con **GitHub Actions**.
+- Validaciones y modelado analítico más avanzados.
+- Almacenamiento tipo Data Lake con archivos **Parquet** y tecnologías como **MinIO**.
+- Visualización con **Power BI**.
+- Exploración de **PySpark**, **Databricks** e infraestructura en la nube, cuando corresponda.
+
+Estas mejoras forman parte de la hoja de ruta; **todavía no se presentan como funcionalidades implementadas**.
+
+## 14. Fuente y autoría
+
+**Fuente pública:** [ARESEP — Datos Abiertos](https://datos.aresep.go.cr/).
+
+Los datos son propiedad de sus respectivos proveedores. Este repositorio se desarrolla con fines educativos, de aprendizaje y de demostración técnica de prácticas de ingeniería de datos.
+
+**Repositorio:** https://github.com/KevinVM98/costa-rica-electricity-data-pipeline
+
