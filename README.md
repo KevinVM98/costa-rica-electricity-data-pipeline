@@ -476,6 +476,143 @@ Consideraciones de seguridad:
 
 Estas mejoras forman parte de la hoja de ruta; **todavía no se presentan como funcionalidades implementadas**.
 
+
+
+## Pruebas automatizadas e integración continua
+
+El proyecto incorpora pruebas unitarias y de integración con
+pytest, ejecutadas automáticamente mediante GitHub Actions.
+
+El objetivo es detectar errores antes de incorporar cambios
+a la rama principal del repositorio.
+
+### Cobertura de pruebas
+
+| Componente | Archivo | Casos |
+|---|---|---:|
+| Selección de períodos | test_periodos.py | 3 |
+| Calidad de datos | test_calidad.py | 13 |
+| Integración con PostgreSQL | test_postgres_integration.py | 4 |
+| Transformaciones SQL | test_transformaciones.py | 4 |
+| **Total** | | **24** |
+
+### Pruebas unitarias
+
+Las pruebas unitarias verifican:
+
+- Selección de años en modo mensual e histórico.
+- Manejo de modos de ejecución inválidos.
+- Presencia de campos obligatorios.
+- Validación de meses y años.
+- Detección de valores de energía no numéricos.
+- Validación de la estructura de los registros.
+
+Estas pruebas no requieren Apache Airflow ni PostgreSQL.
+
+Para ejecutarlas localmente:
+
+```powershell
+python -m pytest tests/test_periodos.py tests/test_calidad.py -v
+```
+
+### Pruebas de integración con PostgreSQL
+
+Las pruebas de integración utilizan una base de datos
+independiente denominada `ice_integration_tests`.
+
+Se verifican los siguientes comportamientos:
+
+- Prevención de duplicados mediante SHA-256.
+- Idempotencia al repetir cargas.
+- Identificación de registros nuevos y existentes.
+- Manejo de cambios en el contenido de los registros.
+- Conversión de valores numéricos en STAGING.
+- Cálculo de energía total en MART.
+- Identificación de períodos ambiguos.
+- Reejecución de transformaciones sin duplicaciones.
+
+Las pruebas utilizan transacciones que se revierten
+automáticamente para evitar conservar datos ficticios.
+
+Para ejecutarlas localmente, se necesita una instancia
+PostgreSQL con el esquema creado mediante `sql/init.sql`.
+
+Variables de entorno necesarias:
+
+- `TEST_PG_HOST`
+- `TEST_PG_PORT`
+- `TEST_PG_DB`
+- `TEST_PG_USER`
+- `TEST_PG_PASSWORD`
+
+La base de datos debe llamarse `ice_integration_tests`.
+
+Una vez configurada la conexión, ejecutar:
+
+```powershell
+python -m pytest tests/ -v
+```
+
+Sin las variables de conexión, las pruebas de integración
+se omiten automáticamente.
+
+### Integración continua con GitHub Actions
+
+El proyecto incluye el workflow:
+
+`.github/workflows/tests.yml`
+
+Este workflow se ejecuta automáticamente en los eventos
+de push y pull request configurados.
+
+Durante cada ejecución, GitHub Actions:
+
+1. Prepara un entorno Linux con Python.
+2. Inicia un contenedor temporal con PostgreSQL 17.
+3. Inicializa la base mediante `sql/init.sql`.
+4. Instala pytest y psycopg.
+5. Ejecuta las pruebas unitarias y de integración.
+6. Reporta los resultados de las verificaciones.
+
+La infraestructura temporal de CI no utiliza las bases
+de datos locales ni las credenciales del entorno original.
+
+### Protección de la rama principal
+
+El repositorio cuenta con una regla de protección
+configurada para `main`.
+
+La configuración requiere:
+
+- Incorporar cambios mediante Pull Requests.
+- Superar el check `Run pytest` de GitHub Actions.
+- Mantener las ramas actualizadas antes del merge.
+- Bloquear eliminaciones y force pushes sobre `main`.
+
+Estas reglas buscan evitar que cambios sin validar
+se incorporen al código principal.
+
+### Resultados verificados
+
+- 24 pruebas aprobadas en el entorno local.
+- Ejecuciones exitosas de GitHub Actions.
+- PostgreSQL temporal utilizado en CI.
+- Validación automática de duplicados, cargas incrementales
+  y transformaciones SQL.
+- Pruebas aisladas de los datos históricos originales.
+
+La batería cubre los escenarios implementados,
+pero no representa una validación exhaustiva de todos
+los posibles errores del pipeline.
+
+
+
+
+
+
+
+
+
 ## 14. Fuente y autoría
 
 **Fuente pública:** [ARESEP — Datos Abiertos](https://datos.aresep.go.cr/).
