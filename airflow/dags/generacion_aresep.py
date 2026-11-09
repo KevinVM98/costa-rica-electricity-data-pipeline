@@ -1,6 +1,7 @@
 
 import json
 import os
+import subprocess
 import time
 
 from pathlib import Path
@@ -26,6 +27,8 @@ BASE_URL = (
 
 DATOS = Path("/opt/airflow/data")
 SQL = Path("/opt/airflow/sql/transformaciones.sql")
+DBT_CLI = "/opt/airflow/dbt-venv/bin/dbt"
+DBT_PROYECTO = "/opt/airflow/dbt"
 
 
 def obtener_anhos_a_procesar():
@@ -635,20 +638,49 @@ def pipeline_generacion():
     def transformar_datos():
         import psycopg
 
+        postgres = configurar_postgres()
         contenido_sql = SQL.read_text(
             encoding="utf-8"
         )
 
         with psycopg.connect(
-            **configurar_postgres(),
+            **postgres,
             autocommit=True
         ) as conn:
 
             with conn.cursor() as cursor:
                 cursor.execute(contenido_sql)
 
-        print("STAGING actualizado")
-        print("MART actualizado")
+        print("STAGING y MART SQL actualizados", flush=True)
+
+        entorno_dbt = {
+            **os.environ,
+            "ARESEP_DBT_PG_HOST": postgres["host"],
+            "ARESEP_DBT_PG_PORT": str(postgres["port"]),
+            "ARESEP_DBT_PG_DB": postgres["dbname"],
+            "ARESEP_DBT_PG_USER": postgres["user"],
+            "DBT_ENV_SECRET_PG_PASSWORD": postgres["password"],
+            "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
+            "DBT_USE_COLORS": "false",
+        }
+
+        with TemporaryDirectory(prefix="aresep-dbt-") as directorio:
+            artefactos = Path(directorio)
+            subprocess.run(
+                [
+                    DBT_CLI,
+                    "build",
+                    "--project-dir", DBT_PROYECTO,
+                    "--profiles-dir", DBT_PROYECTO,
+                    "--target-path", str(artefactos / "target"),
+                    "--log-path", str(artefactos / "logs"),
+                ],
+                cwd=directorio,
+                env=entorno_dbt,
+                check=True,
+            )
+
+        print("MARTs de dbt actualizados y validados")
         print("Pipeline ELT completado")
 
     # ======================================

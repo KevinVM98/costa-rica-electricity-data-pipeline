@@ -1,0 +1,12 @@
+aresep_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('ARESEP_DBT_PG_HOST', '127.0.0.1') }}"
+      port: "{{ env_var('ARESEP_DBT_PG_PORT', '5433') | int }}"
+      dbname: "{{ env_var('ARESEP_DBT_PG_DB', 'ice_data') }}"
+      user: "{{ env_var('ARESEP_DBT_PG_USER', 'ice_user') }}"
+      password: "{{ env_var('DBT_ENV_SECRET_PG_PASSWORD') }}"
+      schema: dbt_dev
+      threads: 1

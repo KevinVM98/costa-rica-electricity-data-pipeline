@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: mart_generacion_mensual_planta
+    description: Una fila por empresa, planta y mes observados, con energía cuando el registro es único y completo.
+    columns:
+      - name: mes
+        description: Fecha del primer día del mes reportado.
+        data_tests: [not_null]
+      - name: empresa_genera
+        description: Empresa generadora reportada por ARESEP.
+        data_tests: [not_null]
+      - name: planta
+        description: Nombre de la planta dentro de la empresa generadora.
+        data_tests: [not_null]
+      - name: registros_periodo
+        description: Cantidad de contenidos distintos recibidos para la empresa, planta y mes.
+      - name: energia_total
+        description: Suma de punta, valle y noche en la unidad de la fuente. Nula si faltan valores o hay varios registros.
+      - name: estado_periodo
+        description: UNICO para energía utilizable, SIN_ENERGIA_COMPLETA si faltan valores o MULTIPLES_REGISTROS si hay ambigüedad.
+
+  - name: mart_generacion_mensual
+    description: Una fila por mes observado, con energía reportada y conteos de períodos planta-empresa por estado.
+    columns:
+      - name: mes
+        description: Fecha del primer día del mes reportado.
+        data_tests: [not_null, unique]
+      - name: energia_reportada
+        description: Suma de la energía de los períodos utilizables. Nula cuando ningún período aporta energía.
+      - name: periodos_observados
+        description: Cantidad de combinaciones empresa y planta con registros en el mes.
+      - name: periodos_con_energia
+        description: Períodos que aportaron un valor de energía al total mensual.
+      - name: periodos_ambiguos
+        description: Períodos excluidos del total por tener múltiples registros.
+      - name: periodos_sin_energia_completa
+        description: Períodos excluidos del total por tener un único registro con mediciones faltantes.

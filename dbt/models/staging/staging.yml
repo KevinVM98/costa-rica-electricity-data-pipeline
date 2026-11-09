@@ -1,0 +1,29 @@
+version: 2
+
+models:
+  - name: stg_generacion_planta
+    description: Una fila por registro de RAW, con nombres sin espacios externos y mediciones numéricas.
+    columns:
+      - name: raw_id
+        description: Identificador de la fila en RAW para rastrear el documento original.
+      - name: anho
+        description: Año reportado por ARESEP.
+      - name: id_mes
+        description: Número del mes reportado por ARESEP.
+      - name: empresa_genera
+        description: Nombre de la empresa generadora.
+      - name: planta
+        description: Nombre reportado de la central eléctrica.
+      - name: energia_punta
+        description: Energía reportada para el período punta.
+      - name: energia_valle
+        description: Energía reportada para el período valle.
+      - name: energia_noche
+        description: Energía reportada para el período noche.
+      - name: factor_carga
+        description: Factor de carga reportado por la fuente.
+      - name: contenido_hash
+        description: Huella SHA-256 del documento recibido.
+        data_tests:
+          - not_null
+          - unique

@@ -1,0 +1,6 @@
+**
+!dbt/requirements.txt
+!dbt/dbt_project.yml
+!dbt/profiles.yml
+!dbt/models/
+!dbt/tests/

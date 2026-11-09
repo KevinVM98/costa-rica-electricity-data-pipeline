@@ -38,6 +38,12 @@ venv/
 
 .pytest_cache/
 
+# DBT LOCAL
+.venv-dbt/
+/dbt/target/
+/dbt/logs/
+/dbt/.user.yml
+
 # ==========================================
 # LOGS Y ARCHIVOS TEMPORALES
 # ==========================================
