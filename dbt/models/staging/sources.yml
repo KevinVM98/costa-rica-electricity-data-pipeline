@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: aresep_raw
+    schema: raw
+    description: Registros históricos de la API de ARESEP cargados por Airflow.
+    tables:
+      - name: generacion_planta_v2
+        description: Una fila por contenido JSONB único identificado por SHA-256.

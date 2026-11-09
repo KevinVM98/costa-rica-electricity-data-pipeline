@@ -2,7 +2,7 @@
 
 Pipeline **ELT de ingeniería de datos** para recopilar, validar, almacenar y preparar para análisis información pública de generación eléctrica por planta en Costa Rica, utilizando la API de datos abiertos de la **Autoridad Reguladora de los Servicios Públicos (ARESEP)**.
 
-El proyecto combina **Python, PostgreSQL, Apache Airflow, SQL y Docker Compose** en una plataforma local que admite cargas históricas e incrementales, controles de calidad y monitoreo operativo.
+El proyecto combina **Python, PostgreSQL, Apache Airflow, dbt, SQL y Docker Compose** en una plataforma local que admite cargas históricas e incrementales, controles de calidad y monitoreo operativo.
 
 > **Alcance:** proyecto personal y educativo de ingeniería de datos. No es una plataforma oficial de ARESEP ni del Instituto Costarricense de Electricidad (ICE). La infraestructura Docker incluida está orientada a desarrollo y demostraciones locales, no a producción.
 
@@ -21,6 +21,7 @@ El proyecto combina **Python, PostgreSQL, Apache Airflow, SQL y Docker Compose**
 | --- | --- |
 | Python | Consumo de la API, validaciones y carga |
 | Apache Airflow 3.3.2 | Orquestación del pipeline |
+| dbt Core | Modelos analíticos y pruebas de datos en PostgreSQL |
 | PostgreSQL 17 | Almacenamiento del conjunto de datos ARESEP |
 | PostgreSQL 16 | Base interna de metadatos de Airflow |
 | SQL | Limpieza, transformación y consultas |
@@ -81,6 +82,7 @@ costa-rica-electricity-data-pipeline/
 │   ├── docker-compose.yaml
 │   ├── compose.override.yaml
 │   └── .env.example
+├── dbt/                   # Modelos analíticos, documentación y pruebas de datos
 ├── sql/
 │   ├── init.sql
 │   └── transformaciones.sql
@@ -214,7 +216,7 @@ Pop-Location
 Generar una clave Fernet válida usando esa imagen:
 
 ```powershell
-docker run --rm aresep-airflow:3.3.2 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+docker run --rm aresep-airflow:3.3.2-dbt python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
 Copiar el valor generado en `FERNET_KEY` dentro de `airflow/.env`, sin comillas ni espacios adicionales. **No publicar ni compartir la clave.**
@@ -287,7 +289,7 @@ Se compone de cinco tareas secuenciales:
 2. `extraer_generacion`: descarga los JSON por año desde ARESEP.
 3. `validar_datos`: revisa la estructura, los campos obligatorios, el año, el mes y los campos numéricos de energía.
 4. `cargar_raw`: incorpora contenidos nuevos a RAW y registra las métricas de carga.
-5. `transformar_datos`: ejecuta `sql/transformaciones.sql` para reconstruir STAGING y actualizar la vista MART.
+5. `transformar_datos`: actualiza los objetos SQL de compatibilidad y ejecuta `dbt build` para construir los modelos y probar los datos.
 
 ### 7.1. Modos de ejecución
 
@@ -330,6 +332,10 @@ Extrae los atributos de interés, normaliza textos y convierte los valores de en
 Es una **vista SQL**, no una tabla de agregados ni una vista materializada. Expone los registros de STAGING, calcula `energia_total` cuando el período tiene un único registro y clasifica las combinaciones ambiguas mediante `estado_periodo`.
 
 Cuando se detectan varios registros para una misma combinación de empresa, planta, año y mes, la vista evita sumar automáticamente esos valores y marca el período como `MULTIPLES_REGISTROS`.
+
+### Modelado analítico con dbt
+
+La tarea `transformar_datos` ejecuta el [proyecto de dbt](dbt/README.md) después de cargar `raw.generacion_planta_v2`. dbt tipa las mediciones en `dbt_dev_staging` y publica dos tablas analíticas en `dbt_dev_mart`. Los objetos de los esquemas `staging` y `mart` mantienen la compatibilidad con las consultas previas.
 
 ## 9. Calidad y monitoreo
 
@@ -464,11 +470,11 @@ Consideraciones de seguridad:
 - Inicialización automática de PostgreSQL.
 - Imagen de Airflow reproducible mediante Dockerfile.
 - Instalación y ejecución histórica desde una clonación limpia de GitHub.
+- Pruebas con **pytest** y ejecución en **GitHub Actions**.
+- Construcción de modelos analíticos y ejecución de pruebas de datos con **dbt** desde Airflow.
 
 ### Mejoras previstas
 
-- Pruebas automatizadas con **pytest**.
-- Integración continua con **GitHub Actions**.
 - Validaciones y modelado analítico más avanzados.
 - Almacenamiento tipo Data Lake con archivos **Parquet** y tecnologías como **MinIO**.
 - Visualización con **Power BI**.

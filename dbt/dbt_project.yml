@@ -1,0 +1,13 @@
+name: aresep_analytics
+version: "1.0.0"
+config-version: 2
+profile: aresep_analytics
+
+models:
+  aresep_analytics:
+    staging:
+      +schema: staging
+      +materialized: view
+    marts:
+      +schema: mart
+      +materialized: table
