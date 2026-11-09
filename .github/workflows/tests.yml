@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - feature/tests-ci
+      - "feature/**"
 
   pull_request:
     branches:
@@ -19,17 +19,56 @@ jobs:
     name: Run pytest
     runs-on: ubuntu-latest
 
+    # PostgreSQL temporal para pruebas de integración
+    services:
+      postgres:
+        image: postgres:17
+
+        env:
+          POSTGRES_USER: ice_user
+          POSTGRES_PASSWORD: ci_test_only_password
+          POSTGRES_DB: ice_integration_tests
+
+        ports:
+          - 5432:5432
+
+        options: >-
+          --health-cmd "pg_isready -U ice_user -d ice_integration_tests"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    # Credenciales exclusivas del contenedor temporal de CI
+    env:
+      TEST_PG_HOST: "127.0.0.1"
+      TEST_PG_PORT: "5432"
+      TEST_PG_DB: ice_integration_tests
+      TEST_PG_USER: ice_user
+      TEST_PG_PASSWORD: ci_test_only_password
+
     steps:
       - name: Descargar repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configurar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Instalar pytest
-        run: python -m pip install pytest
+      - name: Instalar dependencias de pruebas
+        run: |
+          python -m pip install pytest "psycopg[binary]==3.3.5"
 
-      - name: Ejecutar pruebas
+      - name: Inicializar PostgreSQL
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker cp sql/init.sql "${POSTGRES_CONTAINER}:/tmp/init.sql"
+          docker exec "${POSTGRES_CONTAINER}" \
+            psql -v ON_ERROR_STOP=1 \
+            -U ice_user \
+            -d ice_integration_tests \
+            -f /tmp/init.sql
+
+      - name: Ejecutar pruebas unitarias y de integración
         run: python -m pytest tests/ -v
