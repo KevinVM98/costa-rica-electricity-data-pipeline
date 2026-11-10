@@ -75,3 +75,5 @@ cargar_raw.py
 # Ejecutores antiguos reemplazados por Airflow
 ejecutar_pipeline.py
 ejecutar_pipeline.bat
+
+/secrets/

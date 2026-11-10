@@ -1,41 +1,58 @@
-
-# ==========================================
-# DATA ENGINEERING - ARESEP
-# PostgreSQL 17 con Docker Compose
-# ==========================================
-
 services:
-
   db:
     image: postgres:17
-
     container_name: ice-postgres
-
     restart: unless-stopped
 
-    # Configuracion desde .env
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
 
-    # Conexion desde Windows
     ports:
       - "${POSTGRES_PORT}:5432"
 
     volumes:
-
-      # Persistencia de PostgreSQL
       - postgres_data:/var/lib/postgresql/data
-
-      # Inicializacion automatica
-      # Solo al crear una BD desde cero
       - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
 
+  minio:
+    image: ${MINIO_IMAGE:?Configura MINIO_IMAGE en .env}
+    restart: unless-stopped
 
-# ==========================================
-# VOLUMEN PERSISTENTE
-# ==========================================
+    command:
+      - server
+      - /data
+      - --console-address
+      - ":9001"
+      - --license
+      - /minio.license
+
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Configura MINIO_ROOT_USER en .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Configura MINIO_ROOT_PASSWORD en .env}
+
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+
+    volumes:
+      - minio_data:/data
+
+      - type: bind
+        source: ./secrets/minio.license
+        target: /minio.license
+        read_only: true
+        bind:
+          create_host_path: false
+
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
 volumes:
   postgres_data:
+  minio_data:

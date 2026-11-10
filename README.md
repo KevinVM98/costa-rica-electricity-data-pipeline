@@ -2,7 +2,9 @@
 
 Pipeline **ELT de ingeniería de datos** para recopilar, validar, almacenar y preparar para análisis información pública de generación eléctrica por planta en Costa Rica, utilizando la API de datos abiertos de la **Autoridad Reguladora de los Servicios Públicos (ARESEP)**.
 
-El proyecto combina **Python, PostgreSQL, Apache Airflow, dbt, SQL y Docker Compose** en una plataforma local que admite cargas históricas e incrementales, controles de calidad y monitoreo operativo.
+El proyecto combina **Python, PostgreSQL, Apache Airflow, dbt, MinIO AIStor, Parquet y Docker Compose** en una plataforma local que admite cargas históricas e incrementales, controles de calidad y monitoreo operativo.
+
+**Última exportación comprobada (10 de noviembre de 2026): 5.819 filas en 9 archivos Parquet, correspondientes a 2018–2026.** [Detalle de la integración y resultados](docs/minio-parquet.md).
 
 > **Alcance:** proyecto personal y educativo de ingeniería de datos. No es una plataforma oficial de ARESEP ni del Instituto Costarricense de Electricidad (ICE). La infraestructura Docker incluida está orientada a desarrollo y demostraciones locales, no a producción.
 
@@ -11,6 +13,7 @@ El proyecto combina **Python, PostgreSQL, Apache Airflow, dbt, SQL y Docker Comp
 - Extraer datos públicos de generación eléctrica por planta desde una API REST.
 - Mantener un histórico de registros sin volver a insertar contenidos idénticos.
 - Separar el almacenamiento en capas **RAW**, **STAGING** y **MART**.
+- Archivar las respuestas JSON originales y publicar snapshots Parquet validados en almacenamiento compatible con S3.
 - Orquestar el proceso con tareas, reintentos y ejecuciones programadas en Airflow.
 - Validar los datos antes de cargarlos y conservar métricas de cada ejecución.
 - Permitir que el entorno pueda reconstruirse desde una clonación limpia del repositorio.
@@ -22,6 +25,9 @@ El proyecto combina **Python, PostgreSQL, Apache Airflow, dbt, SQL y Docker Comp
 | Python | Consumo de la API, validaciones y carga |
 | Apache Airflow 3.3.2 | Orquestación del pipeline |
 | dbt Core | Modelos analíticos y pruebas de datos en PostgreSQL |
+| MinIO AIStor | Almacenamiento de objetos compatible con S3, con volumen persistente |
+| Boto3 y Botocore 1.43.75 | Acceso a MinIO desde las tareas de Airflow |
+| PyArrow 26.0.1 y Parquet | Exportación tipada por año, compresión Snappy y validación de lectura |
 | PostgreSQL 17 | Almacenamiento del conjunto de datos ARESEP |
 | PostgreSQL 16 | Base interna de metadatos de Airflow |
 | SQL | Limpieza, transformación y consultas |
@@ -33,68 +39,42 @@ La imagen de Airflow se construye a partir de `airflow/Dockerfile`, con las depe
 
 ## 3. Arquitectura
 
-```text
-                         API REST de ARESEP
-                                 |
-                                 v
-                         Apache Airflow
-                                 |
-             +-------------------+------------------+
-             | 1. registrar_inicio                  |
-             | 2. extraer_generacion                |
-             | 3. validar_datos                     |
-             | 4. cargar_raw                        |
-             | 5. transformar_datos                 |
-             +-------------------+------------------+
-                                 |
-                                 v
-                       PostgreSQL (ARESEP)
-                                 |
-                    +------------+------------+
-                    |            |            |
-                   RAW        STAGING        MART
-                  JSONB      SQL tipado    Vista SQL
-                    |            |            |
-                    +------------+------------+
-                                 |
-                       Consumo analítico
-                        (fase posterior)
-
-              Monitoreo operativo en PostgreSQL
-              - monitoring.ejecuciones_pipeline
-              - monitoring.calidad_datos
-              - monitoring.carga_datos
-
-       Infraestructura interna de Airflow (separada)
-             PostgreSQL 16 + Redis + servicios Airflow
+```mermaid
+flowchart TD
+    API["API ARESEP"] --> JSON["MinIO: JSON originales"]
+    JSON -->|Validación y carga| RAW["PostgreSQL: RAW"]
+    RAW --> STG["dbt: STAGING"]
+    STG --> MART["dbt: MARTs mensuales"]
+    STG -->|Exportación validada| PARQUET["MinIO: Parquet por año"]
+    PARQUET --> MANIFEST["latest.json: índice del snapshot"]
 ```
+
+Airflow orquesta el flujo en seis tareas y registra el estado, la calidad y las métricas de carga en el esquema `monitoring`. Los JSON se identifican por ejecución, año y hash; XCom transporta referencias a los objetos. La transformación analítica permanece en dbt.
+
+En MinIO, `processed/` es una copia portable del STAGING de dbt. Los MARTs permanecen en PostgreSQL. El consumidor abre los archivos enumerados en un manifiesto para evitar mezclar snapshots de distintas ejecuciones.
 
 **Importante:** la base de datos interna de Airflow almacena metadatos del orquestador; no debe confundirse con el PostgreSQL 17 que conserva los registros de ARESEP.
 
 ## 4. Estructura del repositorio
 
-```text
-costa-rica-electricity-data-pipeline/
-├── airflow/
-│   ├── dags/
-│   │   └── generacion_aresep.py
-│   ├── Dockerfile
-│   ├── docker-compose.yaml
-│   ├── compose.override.yaml
-│   └── .env.example
-├── dbt/                   # Modelos analíticos, documentación y pruebas de datos
-├── sql/
-│   ├── init.sql
-│   └── transformaciones.sql
-├── compose.yaml
-├── descargar_generacion.py
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
-```
+| Ruta | Responsabilidad |
+| --- | --- |
+| `airflow/dags/generacion_aresep.py` | DAG y coordinación de las seis tareas |
+| `airflow/dags/almacenamiento.py` | Objetos S3, contrato Parquet y manifiestos |
+| `airflow/dags/calidad.py` y `periodos.py` | Calidad de registros y selección de años |
+| `airflow/Dockerfile` | Imagen de Airflow con dependencias fijadas y entorno independiente de dbt |
+| `airflow/docker-compose.yaml` y `compose.override.yaml` | Servicios de Airflow y ajustes locales |
+| `compose.yaml` | PostgreSQL de ARESEP y MinIO AIStor |
+| `dbt/` | Modelos, documentación y pruebas de datos |
+| `sql/` | Inicialización y transformaciones de compatibilidad |
+| `tests/` | Pruebas unitarias y de integración |
+| `.github/workflows/tests.yml` | GitHub Actions con PostgreSQL temporal |
+| `docs/minio-parquet.md` | Diseño, contrato de exportación y resultados observados |
+| `descargar_generacion.py` | Utilidad independiente de descarga manual |
+| `requirements.txt` | Dependencias Python del proyecto |
+| `.env.example` y `airflow/.env.example` | Configuración de ejemplo |
 
-Los archivos `.env`, las credenciales, los registros descargados y los volúmenes de bases de datos **no se publican** en el repositorio.
+Los archivos `.env`, la licencia local `secrets/minio.license`, las credenciales, los registros descargados y los volúmenes persistentes **no se publican** en el repositorio.
 
 ## 5. Origen y cobertura de los datos
 
@@ -120,6 +100,7 @@ La fuente es externa: la disponibilidad, estructura y cantidad de registros pued
 - **Docker Desktop** iniciado, con Docker Compose V2 disponible.
 - **PowerShell** (los ejemplos siguientes usan su sintaxis).
 - Conexión a Internet para descargar imágenes Docker y consultar la API de ARESEP.
+- Un archivo de licencia válido para **MinIO AIStor**. La instalación utilizada emplea AIStor Free de un nodo; obtener la licencia siguiendo la [guía oficial de instalación](https://docs.min.io/aistor/installation/container/install/).
 - Recursos suficientes para ejecutar múltiples contenedores de Airflow. Se recomienda disponer de al menos 4 GB de memoria para Docker, además de los recursos que necesita el sistema operativo.
 
 No es necesario instalar PostgreSQL ni Airflow directamente en Windows.
@@ -131,7 +112,7 @@ git clone https://github.com/KevinVM98/costa-rica-electricity-data-pipeline.git
 cd costa-rica-electricity-data-pipeline
 ```
 
-### 6.3. Configurar PostgreSQL de ARESEP
+### 6.3. Configurar PostgreSQL de ARESEP y MinIO
 
 Crear el archivo local de variables de entorno:
 
@@ -146,22 +127,38 @@ POSTGRES_USER=ice_user
 POSTGRES_PASSWORD=ESTABLECER_UNA_CONTRASENA_PROPIA
 POSTGRES_DB=ice_data
 POSTGRES_PORT=5433
+MINIO_ROOT_USER=aresep_admin
+MINIO_ROOT_PASSWORD=ESTABLECER_OTRA_CONTRASENA_PROPIA
+MINIO_API_PORT=9000
+MINIO_CONSOLE_PORT=9001
 ```
+
+Conservar también `MINIO_IMAGE` del archivo de ejemplo: debe ser una referencia completa a la imagen de AIStor fijada por digest (`quay.io/minio/aistor/minio@sha256:...`). La referencia es pública; las contraseñas reales se guardan exclusivamente en `.env`.
+
+Crear la carpeta local de la licencia:
+
+```powershell
+New-Item -ItemType Directory -Force .\secrets | Out-Null
+```
+
+Copiar el archivo de licencia descargado a `secrets/minio.license`. La carpeta está excluida de Git y Compose monta la licencia como archivo de solo lectura.
 
 El puerto `5433` es el valor predeterminado de esta instalación. Si está ocupado, utilizar otro puerto disponible y actualizar también `ICE_PG_PORT` en `airflow/.env`.
 
-Iniciar PostgreSQL desde la raíz del proyecto:
+Iniciar ambos servicios desde la raíz del proyecto:
 
 ```powershell
-docker compose up -d db
+docker compose up -d --wait --wait-timeout 180 db minio
 ```
 
 En una base nueva, Docker crea un volumen persistente y PostgreSQL ejecuta automáticamente `sql/init.sql`, que prepara los esquemas y tablas del pipeline.
 
+Abrir [la consola de MinIO](http://localhost:9001), iniciar sesión con los valores `MINIO_ROOT_USER` y `MINIO_ROOT_PASSWORD` y crear el bucket **`aresep-data`**. El puerto `9000` atiende las peticiones S3; el `9001` corresponde a la consola.
+
 Comprobar el contenedor:
 
 ```powershell
-docker compose ps db
+docker compose ps db minio
 ```
 
 Verificar las tablas del proyecto:
@@ -198,12 +195,19 @@ ICE_PG_PORT=5433
 ICE_PG_DB=ice_data
 ICE_PG_USER=ice_user
 ICE_PG_PASSWORD=LA_MISMA_CONTRASENA_DE_POSTGRES_PASSWORD
+S3_ENDPOINT_URL=http://host.docker.internal:9000
+S3_BUCKET=aresep-data
+S3_REGION=us-east-1
+S3_ACCESS_KEY_ID=aresep_admin
+S3_SECRET_ACCESS_KEY=LA_MISMA_CONTRASENA_DE_MINIO_ROOT_PASSWORD
 ```
 
 - `ICE_PG_PASSWORD` debe coincidir con `POSTGRES_PASSWORD` del `.env` de la raíz.
 - `ICE_PG_PORT` debe coincidir con el puerto publicado por PostgreSQL de ARESEP.
 - `ICE_PG_HOST=host.docker.internal` permite llegar desde los contenedores de Airflow al puerto publicado por Docker Desktop en Windows.
 - `FERNET_KEY` debe contener una clave válida generada localmente; nunca debe subirse a GitHub.
+- Para la instalación local descrita, `S3_ACCESS_KEY_ID` y `S3_SECRET_ACCESS_KEY` corresponden al usuario y contraseña de MinIO. El SDK utiliza estos valores para autenticar las peticiones S3.
+- `S3_ENDPOINT_URL` debe usar el puerto API de MinIO. Si se cambió `MINIO_API_PORT`, ajustar también esta dirección.
 
 Desde la raíz del repositorio, construir primero la imagen personalizada:
 
@@ -273,7 +277,7 @@ Abrir la interfaz de Airflow:
 
 El puerto web `8080` es el predeterminado en `airflow/docker-compose.yaml`. Si ya está ocupado, cambiar **solo el puerto publicado del API Server**, por ejemplo de `8080:8080` a `8081:8080`, y abrir `http://localhost:8081`.
 
-El primer arranque de Airflow puede requerir más tiempo que los siguientes. Comprobar los estados y logs si algún servicio no alcanza un estado saludable.
+El primer arranque de Airflow puede requerir más tiempo que los siguientes. Comprobar los estados y logs si algún servicio no alcanza un estado saludable. El override conserva los chequeos originales y establece para worker, scheduler, dag-processor y triggerer un timeout de 60 segundos, intervalo de 60 segundos y margen inicial de 120 segundos. Este ajuste resolvió los timeouts de 10 segundos observados en el entorno local; no desactiva los chequeos.
 
 ## 7. Ejecutar el pipeline
 
@@ -283,13 +287,14 @@ El DAG se llama:
 generacion_electrica_aresep
 ```
 
-Se compone de cinco tareas secuenciales:
+Se compone de seis tareas que se ejecutan en este orden:
 
 1. `registrar_inicio`: crea el registro inicial de la ejecución.
-2. `extraer_generacion`: descarga los JSON por año desde ARESEP.
-3. `validar_datos`: revisa la estructura, los campos obligatorios, el año, el mes y los campos numéricos de energía.
-4. `cargar_raw`: incorpora contenidos nuevos a RAW y registra las métricas de carga.
+2. `extraer_generacion`: descarga y archiva los cuerpos JSON originales en MinIO, por año y ejecución; devuelve referencias mediante XCom.
+3. `validar_datos`: lee los objetos de MinIO, comprueba su hash y revisa la estructura, los campos obligatorios, el año, el mes y los campos numéricos de energía.
+4. `cargar_raw`: lee las mismas referencias, incorpora contenidos nuevos a RAW y registra las métricas de carga.
 5. `transformar_datos`: actualiza los objetos SQL de compatibilidad y ejecuta `dbt build` para construir los modelos y probar los datos.
+6. `exportar_parquet`: obtiene un snapshot completo del STAGING de dbt, publica un Parquet por año, verifica los archivos descargándolos desde MinIO y publica los manifiestos.
 
 ### 7.1. Modos de ejecución
 
@@ -303,7 +308,9 @@ Para ejecutar el histórico desde la interfaz de Airflow:
 1. Abrir **Dags** y seleccionar `generacion_electrica_aresep`.
 2. Seleccionar **Trigger** y mantener **Single Run**.
 3. En **Tipo de carga**, elegir **Histórica (desde 2018)**.
-4. Confirmar la ejecución y revisar que las cinco tareas finalicen correctamente.
+4. Confirmar la ejecución y revisar que las seis tareas finalicen correctamente.
+
+La primera ejecución tras incorporar MinIO conviene realizarla en modo `historico` para archivar también las respuestas de años anteriores. En ambos modos, la exportación Parquet incluye todo el STAGING disponible en PostgreSQL, aunque la descarga mensual consulte solo dos años.
 
 **No utilizar la función de backfill de Airflow para esta operación:** el modo `historico` ya realiza la descarga de todos los años dentro de **una sola ejecución del DAG**.
 
@@ -337,6 +344,16 @@ Cuando se detectan varios registros para una misma combinación de empresa, plan
 
 La tarea `transformar_datos` ejecuta el [proyecto de dbt](dbt/README.md) después de cargar `raw.generacion_planta_v2`. dbt tipa las mediciones en `dbt_dev_staging` y publica dos tablas analíticas en `dbt_dev_mart`. Los objetos de los esquemas `staging` y `mart` mantienen la compatibilidad con las consultas previas.
 
+### JSON y Parquet en MinIO
+
+- `raw/generacion_planta/`: respuestas originales por ejecución y año. El hash del contenido forma parte de la clave del objeto.
+- `processed/generacion_planta/`: snapshots Parquet del modelo `dbt_dev_staging.stg_generacion_planta`, separados por año.
+- `processed/generacion_planta/latest.json`: manifiesto del último snapshot publicado correctamente, con rutas, conteos, esquema y hashes.
+
+Cada Parquet conserva el grano de STAGING: una fila por contenido distinto en RAW, no necesariamente una sola fila por planta y mes. La energía y el factor de carga se exportan como `decimal128(38,12)`, preservando exactamente los valores que caben en el contrato. Los nulos continúan siendo nulos.
+
+Para consumir un snapshot, leer exclusivamente los archivos de un manifiesto. Leer todos los archivos bajo `processed/` mezclaría ejecuciones y repetiría filas. [Contrato, validaciones y límites](docs/minio-parquet.md).
+
 ## 9. Calidad y monitoreo
 
 Antes de cargar RAW, el DAG comprueba:
@@ -347,6 +364,8 @@ Antes de cargar RAW, el DAG comprueba:
 - Que los campos de energía informados sean numéricos finitos.
 
 Si se detectan errores, la tarea de validación falla y no continúa con la carga correspondiente.
+
+La exportación añade checks propios de columnas, tipos, rangos, nulos y unicidad. PyArrow valida la tabla y se comprueban longitud, SHA-256, esquema y valores después de descargar cada Parquet desde MinIO. `latest.json` se actualiza cuando todos los archivos del snapshot superan esas comprobaciones. Los checks no garantizan que la fuente haya publicado todos los meses o plantas.
 
 Las métricas se almacenan en:
 
@@ -392,6 +411,8 @@ docker compose exec db psql -U ice_user -d ice_data -c "SELECT COUNT(DISTINCT an
 
 ## 11. Prueba de reproducibilidad realizada
 
+La instalación limpia descrita a continuación corresponde a la etapa anterior a MinIO/Parquet, cuando el DAG tenía cinco tareas. La ampliación de almacenamiento se comprobó posteriormente en el entorno local existente; esa ejecución se documenta por separado.
+
 Se creó un **clon limpio del repositorio publicado en GitHub**, con una instalación de PostgreSQL y Airflow independiente del entorno de desarrollo habitual.
 
 La prueba comprobó:
@@ -422,6 +443,25 @@ En la revisión de calidad realizada, los años consultados aparecieron con **0 
 
 La reproducibilidad comprobada corresponde a un **entorno local con Docker Desktop**. No equivale todavía a una certificación de despliegue en producción o en múltiples sistemas operativos.
 
+### Exportación MinIO/Parquet comprobada el 10 de noviembre de 2026
+
+La ejecución `manual__2026-11-10T20:05:44.523763+00:00` publicó un manifiesto con **5.819 filas en 9 archivos Parquet**. Se verificó el resumen leyendo `processed/generacion_planta/latest.json` desde el worker de Airflow.
+
+| Año | Filas en Parquet |
+| --- | ---: |
+| 2018 | 292 |
+| 2019 | 692 |
+| 2020 | 658 |
+| 2021 | 663 |
+| 2022 | 733 |
+| 2023 | 753 |
+| 2024 | 648 |
+| 2025 | 815 |
+| 2026 | 565 |
+| **Total** | **5.819** |
+
+Estos son resultados de una ejecución concreta. La cobertura disponible de los años sigue siendo parcial en los extremos del período y los conteos pueden cambiar cuando se actualice la fuente.
+
 ### Ejecutar dos copias en una misma computadora
 
 Para una instalación de prueba **en paralelo** con otra ya levantada, se deben separar:
@@ -429,6 +469,7 @@ Para una instalación de prueba **en paralelo** con otra ya levantada, se deben 
 - El `container_name` de PostgreSQL en el `compose.yaml` del clon.
 - El `POSTGRES_PORT` de la raíz y el `ICE_PG_PORT` de Airflow.
 - El puerto publicado del `airflow-apiserver` (por ejemplo, `8081:8080`).
+- Los puertos `MINIO_API_PORT` y `MINIO_CONSOLE_PORT`, el `S3_ENDPOINT_URL` del segundo Airflow y su configuración de bucket/licencia.
 - Los nombres de proyecto de Docker Compose, mediante `-p`, para obtener redes y volúmenes independientes.
 
 Durante la prueba se utilizaron los proyectos Compose `aresep-prueba` y `aresep-airflow-prueba`, el contenedor `ice-postgres-prueba` y los puertos `5434` (PostgreSQL) y `8081` (Airflow). **Estos ajustes solo se necesitan cuando ambas instalaciones conviven**; la instalación predeterminada usa los puertos `5433` y `8080`.
@@ -443,17 +484,17 @@ docker compose -f docker-compose.yaml -f compose.override.yaml down
 Pop-Location
 ```
 
-Para detener PostgreSQL de ARESEP conservando su volumen:
+Para detener PostgreSQL de ARESEP y MinIO conservando sus volúmenes:
 
 ```powershell
 docker compose down
 ```
 
-**No añadir `-v` a `docker compose down` si se desea conservar los datos.** La eliminación de volúmenes puede borrar las bases persistentes.
+**No añadir `-v` a `docker compose down` si se desea conservar los datos.** La eliminación de volúmenes puede borrar las bases persistentes y los objetos guardados en MinIO.
 
 Consideraciones de seguridad:
 
-- No publicar `.env`, contraseñas ni claves Fernet.
+- No publicar `.env`, contraseñas, claves Fernet ni `secrets/minio.license`.
 - Sustituir las credenciales de ejemplo antes de usar el entorno.
 - La configuración de Airflow incluida utiliza valores adecuados para pruebas locales; requiere endurecimiento de seguridad antes de exponerse a redes públicas.
 - Verificar los datos y las métricas antes de utilizarlos para conclusiones analíticas.
@@ -466,17 +507,19 @@ Consideraciones de seguridad:
 - Carga histórica y carga incremental por contenido.
 - Controles de calidad y monitoreo en PostgreSQL.
 - Organización de datos en RAW, STAGING y MART.
-- Orquestación con Airflow y ejecución del DAG de cinco tareas.
+- Orquestación con Airflow y ejecución del DAG de seis tareas.
 - Inicialización automática de PostgreSQL.
 - Imagen de Airflow reproducible mediante Dockerfile.
 - Instalación y ejecución histórica desde una clonación limpia de GitHub.
 - Pruebas con **pytest** y ejecución en **GitHub Actions**.
 - Construcción de modelos analíticos y ejecución de pruebas de datos con **dbt** desde Airflow.
+- Archivo de respuestas JSON originales en MinIO y referencias de objetos mediante XCom.
+- Exportación Parquet por año, contrato de tipos, verificación de integridad y manifiestos de snapshots.
 
 ### Mejoras previstas
 
 - Validaciones y modelado analítico más avanzados.
-- Almacenamiento tipo Data Lake con archivos **Parquet** y tecnologías como **MinIO**.
+- Política de retención de snapshots y evaluación de exportación por lotes para mayores volúmenes.
 - Visualización con **Power BI**.
 - Exploración de **PySpark**, **Databricks** e infraestructura en la nube, cuando corresponda.
 
@@ -484,7 +527,7 @@ Estas mejoras forman parte de la hoja de ruta; **todavía no se presentan como f
 
 
 
-## Pruebas automatizadas e integración continua
+## 14. Pruebas automatizadas e integración continua
 
 El proyecto incorpora pruebas unitarias y de integración con
 pytest, ejecutadas automáticamente mediante GitHub Actions.
@@ -500,7 +543,10 @@ a la rama principal del repositorio.
 | Calidad de datos | test_calidad.py | 13 |
 | Integración con PostgreSQL | test_postgres_integration.py | 4 |
 | Transformaciones SQL | test_transformaciones.py | 4 |
-| **Total** | | **24** |
+| Almacenamiento y Parquet | test_almacenamiento.py | 29 |
+| **Total de casos** | | **53** |
+
+Los 8 casos de PostgreSQL requieren la base de integración configurada; los otros 45 pueden ejecutarse sin PostgreSQL ni MinIO. Las pruebas de almacenamiento utilizan Parquet real y un doble de S3 en memoria.
 
 ### Pruebas unitarias
 
@@ -512,13 +558,17 @@ Las pruebas unitarias verifican:
 - Validación de meses y años.
 - Detección de valores de energía no numéricos.
 - Validación de la estructura de los registros.
+- Conservación de decimales, nulos y ceros en Parquet.
+- Detección de alteraciones de archivos y cambios del esquema.
+- Reintentos que reutilizan claves y fallos que conservan el último snapshot publicado.
 
 Estas pruebas no requieren Apache Airflow ni PostgreSQL.
 
 Para ejecutarlas localmente:
 
 ```powershell
-python -m pytest tests/test_periodos.py tests/test_calidad.py -v
+python -m pip install pytest -r requirements.txt
+python -m pytest tests/test_periodos.py tests/test_calidad.py tests/test_almacenamiento.py -v
 ```
 
 ### Pruebas de integración con PostgreSQL
@@ -576,7 +626,7 @@ Durante cada ejecución, GitHub Actions:
 1. Prepara un entorno Linux con Python.
 2. Inicia un contenedor temporal con PostgreSQL 17.
 3. Inicializa la base mediante `sql/init.sql`.
-4. Instala pytest y psycopg.
+4. Instala pytest y las dependencias de `requirements.txt`, incluidas Boto3 y PyArrow.
 5. Ejecuta las pruebas unitarias y de integración.
 6. Reporta los resultados de las verificaciones.
 
@@ -600,12 +650,11 @@ se incorporen al código principal.
 
 ### Resultados verificados
 
-- 24 pruebas aprobadas en el entorno local.
-- Ejecuciones exitosas de GitHub Actions.
-- PostgreSQL temporal utilizado en CI.
-- Validación automática de duplicados, cargas incrementales
-  y transformaciones SQL.
-- Pruebas aisladas de los datos históricos originales.
+- La etapa anterior completó 24 pruebas y ejecuciones de GitHub Actions con PostgreSQL temporal.
+- Para esta ampliación se comprobaron 45 casos unitarios, incluidos los 29 de almacenamiento. Las dos suites que necesitan PostgreSQL se omitieron en ese entorno de preparación.
+- Se comprobó la importación del DAG con Airflow 3.3.2 y sus seis tareas.
+- La ejecución real contra ARESEP, PostgreSQL y MinIO publicó los 9 Parquet y las 5.819 filas documentados en la sección 11.
+- El resultado del workflow de esta rama debe revisarse en GitHub Actions antes del merge.
 
 La batería cubre los escenarios implementados,
 pero no representa una validación exhaustiva de todos
@@ -619,7 +668,7 @@ los posibles errores del pipeline.
 
 
 
-## 14. Fuente y autoría
+## 15. Fuente y autoría
 
 **Fuente pública:** [ARESEP — Datos Abiertos](https://datos.aresep.go.cr/).
 

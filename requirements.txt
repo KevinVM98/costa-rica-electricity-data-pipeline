@@ -15,3 +15,8 @@ psycopg[binary]==3.3.5
 
 # Manejo de fechas y zonas horarias
 pendulum==3.2.0
+
+# Almacenamiento S3 y Parquet
+boto3==1.43.75
+botocore==1.43.75
+pyarrow==26.0.1

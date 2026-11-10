@@ -1,6 +1,10 @@
+x-airflow-healthcheck: &airflow-healthcheck
+  interval: 60s
+  timeout: 60s
+  retries: 5
+  start_period: 120s
 
 services:
-
   airflow-worker:
     env_file:
       - .env
@@ -9,6 +13,8 @@ services:
       - ../datos:/opt/airflow/data
       - ../sql:/opt/airflow/sql:ro
 
+    healthcheck: *airflow-healthcheck
+
   airflow-dag-processor:
     env_file:
       - .env
@@ -16,3 +22,11 @@ services:
     volumes:
       - ../datos:/opt/airflow/data
       - ../sql:/opt/airflow/sql:ro
+
+    healthcheck: *airflow-healthcheck
+
+  airflow-scheduler:
+    healthcheck: *airflow-healthcheck
+
+  airflow-triggerer:
+    healthcheck: *airflow-healthcheck
