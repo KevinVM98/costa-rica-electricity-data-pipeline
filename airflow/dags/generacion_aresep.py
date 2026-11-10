@@ -13,6 +13,7 @@ import pendulum
 from airflow.sdk import dag, task, get_current_context, Param
 from periodos import seleccionar_anhos
 from calidad import validar_registro
+from almacenamiento import AlmacenamientoS3
 
 
 # ==========================================
@@ -25,7 +26,6 @@ BASE_URL = (
     "ObtenerGeneracionFuentePlantaYCapacidadInstalada"
 )
 
-DATOS = Path("/opt/airflow/data")
 SQL = Path("/opt/airflow/sql/transformaciones.sql")
 DBT_CLI = "/opt/airflow/dbt-venv/bin/dbt"
 DBT_PROYECTO = "/opt/airflow/dbt"
@@ -231,90 +231,67 @@ def pipeline_generacion():
     def extraer_generacion():
         import requests
 
-        DATOS.mkdir(
-            parents=True,
-            exist_ok=True
-        )
-
+        contexto = get_current_context()
+        dag_id = contexto["ti"].dag_id
+        run_id = contexto["ti"].run_id
+        almacenamiento = AlmacenamientoS3()
         anhos = obtener_anhos_a_procesar()
+        lotes = []
         total = 0
 
-        with TemporaryDirectory(
-            dir=DATOS
-        ) as temporal:
-
-            temporal = Path(temporal)
-
+        with requests.Session() as sesion:
             for anho in anhos:
-
                 url = f"{BASE_URL}/{anho}"
-
                 print(f"Descargando {anho}...")
 
-                respuesta = requests.get(
-                    url,
-                    timeout=120
+                with sesion.get(url, timeout=120) as respuesta:
+                    respuesta.raise_for_status()
+                    contenido_original = respuesta.content
+
+                # Guardar el cuerpo original ANTES de validar su estructura.
+                # Si cambia la API, queda evidencia para investigar el fallo.
+                referencia = almacenamiento.guardar_raw(
+                    dag_id, run_id, anho, contenido_original
                 )
-
-                respuesta.raise_for_status()
-
-                contenido = respuesta.json()
+                contenido = json.loads(contenido_original)
+                if not isinstance(contenido, dict):
+                    raise ValueError(f"Respuesta JSON inesperada para {anho}")
                 registros = contenido.get("value")
 
                 if not isinstance(registros, list) or not registros:
-                    raise ValueError(
-                        f"Sin registros para {anho}"
-                    )
-
+                    raise ValueError(f"Sin registros para {anho}")
                 if not all(
                     isinstance(r, dict)
                     and str(r.get("anho")) == str(anho)
                     for r in registros
                 ):
-                    raise ValueError(
-                        f"Registros inesperados para {anho}"
-                    )
+                    raise ValueError(f"Registros inesperados para {anho}")
 
-                archivo = (
-                    temporal / f"generacion_{anho}.json"
-                )
-
-                archivo.write_text(
-                    json.dumps(
-                        contenido,
-                        ensure_ascii=False
-                    ),
-                    encoding="utf-8"
-                )
-
+                lotes.append({
+                    "anho": anho,
+                    "url": url,
+                    "registros": len(registros),
+                    "objeto": referencia,
+                })
                 total += len(registros)
-
                 print(
-                    f"{anho}: {len(registros)} registros"
+                    f"{anho}: {len(registros)} registros archivados en "
+                    f"s3://{referencia['bucket']}/{referencia['key']}"
                 )
 
-            for anho in anhos:
-
-                origen = (
-                    temporal / f"generacion_{anho}.json"
-                )
-
-                destino = (
-                    DATOS / f"generacion_{anho}.json"
-                )
-
-                os.replace(origen, destino)
-
-        print(
-            f"Extraccion completada: {total}"
+        manifest = almacenamiento.publicar_extraccion(
+            dag_id, run_id, contexto["params"]["modo"], lotes
         )
+        print(f"Extraccion completada: {total}")
+        # XCom recibe referencias pequenas; los documentos permanecen en MinIO.
+        return {"manifest": manifest, "lotes": lotes}
 
     # ======================================
     # TAREA 3: CALIDAD DE DATOS
     # ======================================
 
     @task(retries=1)
-    def validar_datos():
+    def validar_datos(extraccion):
         import psycopg
 
         contexto = get_current_context()
@@ -323,16 +300,11 @@ def pipeline_generacion():
         errores = []
         resumen = []
         total_revisados = 0
+        almacenamiento = AlmacenamientoS3()
 
-        for anho in obtener_anhos_a_procesar():
-
-            archivo = (
-                DATOS / f"generacion_{anho}.json"
-            )
-
-            contenido = json.loads(
-                archivo.read_text(encoding="utf-8")
-            )
+        for lote in extraccion["lotes"]:
+            anho = lote["anho"]
+            contenido = almacenamiento.leer_json(lote["objeto"])
 
             registros = contenido.get("value")
 
@@ -417,12 +389,13 @@ def pipeline_generacion():
     # ======================================
 
     @task(retries=1)
-    def cargar_raw():
+    def cargar_raw(extraccion):
         import psycopg
         from psycopg.types.json import Jsonb
 
         contexto = get_current_context()
         dag_run_id = contexto["ti"].run_id
+        almacenamiento = AlmacenamientoS3()
 
         sql_insertar = """
             WITH entrada AS (
@@ -530,17 +503,11 @@ def pipeline_generacion():
 
             with conn.cursor() as cursor:
 
-                for anho in obtener_anhos_a_procesar():
+                for lote in extraccion["lotes"]:
 
                     inicio = time.perf_counter()
-
-                    archivo = (
-                        DATOS / f"generacion_{anho}.json"
-                    )
-
-                    contenido = json.loads(
-                        archivo.read_text(encoding="utf-8")
-                    )
+                    anho = lote["anho"]
+                    contenido = almacenamiento.leer_json(lote["objeto"])
 
                     registros = contenido["value"]
 
@@ -681,19 +648,55 @@ def pipeline_generacion():
             )
 
         print("MARTs de dbt actualizados y validados")
-        print("Pipeline ELT completado")
+
+    # ======================================
+    # TAREA 6: SNAPSHOT PARQUET DEL STAGING DBT
+    # ======================================
+
+    @task(retries=1, retry_delay=timedelta(minutes=1))
+    def exportar_parquet(extraccion):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        contexto = get_current_context()
+        # Snapshot consistente de la vista. SELECT * permite detectar cambios
+        # de columnas al aplicar el contrato de exportacion.
+        with psycopg.connect(
+            **configurar_postgres(), row_factory=dict_row
+        ) as conn:
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            registros = conn.execute(
+                "SELECT * FROM dbt_dev_staging.stg_generacion_planta "
+                "ORDER BY anho, contenido_hash"
+            ).fetchall()
+
+        resultado = AlmacenamientoS3().publicar_snapshot(
+            registros,
+            contexto["ti"].dag_id,
+            contexto["ti"].run_id,
+            extraccion=extraccion["manifest"],
+        )
+        for archivo in resultado["archivos"]:
+            print(
+                f"{archivo['anho']}: {archivo['filas']} filas Parquet "
+                f"validadas en s3://{archivo['bucket']}/{archivo['key']}"
+            )
+        print(f"Snapshot publicado: {resultado['filas']} filas")
+        print("Pipeline ELT y almacenamiento en MinIO completados")
+        return resultado["manifest"]
 
     # ======================================
     # DEPENDENCIAS
     # ======================================
 
-    (
-        registrar_inicio()
-        >> extraer_generacion()
-        >> validar_datos()
-        >> cargar_raw()
-        >> transformar_datos()
-    )
+    inicio = registrar_inicio()
+    extraccion = extraer_generacion()
+    validacion = validar_datos(extraccion)
+    carga = cargar_raw(extraccion)
+    transformacion = transformar_datos()
+    exportacion = exportar_parquet(extraccion)
+
+    inicio >> extraccion >> validacion >> carga >> transformacion >> exportacion
 
 
 pipeline_generacion()
